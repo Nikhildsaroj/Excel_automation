@@ -41,7 +41,7 @@ with st.expander("📋 Instructions (Click to Expand)"):
     ### What the analysis includes:
     - Filtering of website orders only
     - Calculation of shipping costs (₹65 for first kg, ₹65/kg additional)
-    - Calculation of selling price with GST (1.8 × discounted price)
+    - Calculation of selling price with GST (1.18 × discounted price)
     - Website charges (1.85% of selling price with GST)
     - Profitability metrics
     """)
@@ -87,6 +87,14 @@ if sales_file and cost_file:
                     if len(missing_cost_skus) > 0:
                         st.warning(f"Cost data not found for these SKUs: {', '.join(map(str, missing_cost_skus[:5]))}{'...' if len(missing_cost_skus) > 5 else ''}")
                     
+                    # Replace missing Landing Cost GST with NA (string) for clarity in the output
+                    website_df["Landing Cost GST"] = website_df["Landing Cost GST"].fillna("NA")
+                    
+                    # Numeric version for calculations (missing cost = 0)
+                    website_df["Landing Cost GST Num"] = pd.to_numeric(
+                        website_df["Landing Cost GST"], errors="coerce"
+                    ).fillna(0)
+                    
                     # SHIPPING calculation
                     def calc_shipping(w):
                         try:
@@ -97,13 +105,18 @@ if sales_file and cost_file:
                     website_df["Shipping"] = website_df["Weight(KG)"].apply(calc_shipping)
                     
                     # SELLING PRICE WITH GST
-                    website_df["Selling Prize with gst"] = website_df["Dis Price"] * 1.8
+                    website_df["Selling Prize with gst"] = website_df["Dis Price"] * 1.18
                     
                     # WEBSITE CHARGE
                     website_df["Website charge"] = website_df["Selling Prize with gst"] * 0.0185
                     
-                    # Calculate profit
-                    website_df["Profit"] = website_df["Dis Price"] - website_df["Landing Cost GST"] - website_df["Shipping"] - website_df["Website charge"]
+                    # Calculate profit using numeric Landing Cost
+                    website_df["Profit"] = (
+                        website_df["Dis Price"]
+                        - website_df["Landing Cost GST Num"]
+                        - website_df["Shipping"]
+                        - website_df["Website charge"]
+                    )
                     
                     # Display results
                     st.header("2. Analysis Results")
@@ -133,7 +146,7 @@ if sales_file and cost_file:
                     output_csv = BytesIO()
                     
                     # Create DataFrame without Profit column for export
-                    export_df = website_df.drop(columns=['Profit'], errors='ignore')
+                    export_df = website_df.drop(columns=['Profit', 'Landing Cost GST Num'], errors='ignore')
                     
                     # Excel file
                     with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
@@ -146,7 +159,7 @@ if sales_file and cost_file:
                             'Value': [
                                 len(website_df),
                                 website_df['Dis Price'].sum(),
-                                website_df['Landing Cost GST'].sum(),
+                                website_df['Landing Cost GST Num'].sum(),
                                 website_df['Shipping'].sum(),
                                 website_df['Website charge'].sum(),
                                 website_df['Profit'].sum(),
