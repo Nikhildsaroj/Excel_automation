@@ -23,7 +23,7 @@ with st.expander("📋 Instructions (Click to Expand)"):
     ### How to use this tool:
     
     1. **Prepare your files**:
-       - Sales file should contain these columns: 
+       - Sales file should contain: 
          - 'Order From'
          - 'SKU'
          - 'Weight(KG)'
@@ -71,7 +71,8 @@ if sales_file and cost_file:
             # Define office sales sources
             office_sources = [
                 "nan", "Tender", "Direct Sales", "Chat Tawk",
-                "Reseller", "Instagram", "Facebook", "India Mart", "","Just Dial","Exhibition",
+                "Reseller", "Instagram", "Facebook", "India Mart", "",
+                "Just Dial", "Exhibition"
             ]
 
             # Normalize "Order From" column
@@ -128,6 +129,19 @@ if sales_file and cost_file:
 
                 # WEBSITE CHARGE
                 filtered_df["Website charge"] = filtered_df["Selling Prize with gst"] * 0.0185
+
+                # === Ensure Arrow-safe types for display ===
+                for col in filtered_df.columns:
+                    if filtered_df[col].dtype == "object":
+                        filtered_df[col] = filtered_df[col].astype(str)
+
+                # === Show Formulas Section ===
+                with st.expander("📐 Calculation Formulas"):
+                    st.markdown("""
+                    - **Shipping** = ₹65 if Weight ≤ 1 kg, else Weight × ₹65  
+                    - **Selling Price with GST** = Discounted Price × 1.18  
+                    - **Website Charge** = Selling Price with GST × 1.85%  
+                    """)
 
                 # === Sorting Option ===
                 st.header("3. Sorting Options")
