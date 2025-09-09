@@ -3,202 +3,182 @@ import streamlit as st
 import openpyxl
 from io import BytesIO
 
-# Set up the Streamlit app
+# =====================
+# HELPER FUNCTIONS
+# =====================
+def calc_shipping(w):
+    try:
+        return 65 if float(w) <= 1 else float(w) * 65
+    except:
+        return 0
+
+def process_website_orders(df, cost_df):
+    df = df[df["Order From"].str.lower().str.contains("website")].copy()
+    if df.empty: 
+        return df
+
+    cost_df_unique = cost_df.drop_duplicates(subset="SKU", keep="first")
+    df = df.merge(cost_df_unique[["SKU", "Landing Cost GST"]], on="SKU", how="left")
+
+    df["Landing Cost GST"] = df["Landing Cost GST"].fillna("NA")
+    df["Landing Cost GST Num"] = pd.to_numeric(df["Landing Cost GST"], errors="coerce").fillna(0)
+
+    df["Shipping"] = df["Weight(KG)"].apply(calc_shipping)
+    df["Selling Price with gst"] = df["Dis Price"] * 1.18
+    df["Website charge"] = df["Selling Price with gst"] * 0.0185
+
+    # GP formula (with Website charge)
+    df["GP"] = df["Selling Price with gst"] - (
+        df["Landing Cost GST Num"] + df["Shipping"] + df["Website charge"]
+    )
+    df["GP %"] = df.apply(lambda r: (r["GP"] / r["Selling Price with gst"] * 100) if r["Selling Price with gst"] else 0, axis=1)
+
+    if "Sr.No" not in df.columns:
+        df.insert(0, "Sr.No", range(1, len(df) + 1))
+
+    website_cols = [
+        "Sr.No", "Model Name", "SKU", "Product Type", "Brand Company", "QR Code",
+        "Weight(KG)", "Order From", "Order Id", "Qty", "Dis Price", "Date",
+        "Landing Cost GST", "Shipping", "Website charge",
+        "Selling Price with gst", "GP", "GP %"
+    ]
+    return df.reindex(columns=[c for c in website_cols if c in df.columns])
+
+def process_office_orders(df, cost_df):
+    office_sources = [
+        "nan", "Tender", "Direct Sales", "Chat Tawk",
+        "Reseller", "Instagram", "Facebook", "India Mart", "",
+        "Just Dial", "Exhibition"
+    ]
+    df = df[df["Order From"].isin(office_sources)].copy()
+    if df.empty:
+        return df
+
+    cost_df_unique = cost_df.drop_duplicates(subset="SKU", keep="first")
+    df = df.merge(cost_df_unique[["SKU", "Landing Cost GST"]], on="SKU", how="left")
+
+    df["Landing Cost GST"] = df["Landing Cost GST"].fillna("NA")
+    df["Landing Cost GST Num"] = pd.to_numeric(df["Landing Cost GST"], errors="coerce").fillna(0)
+
+    df["Shipping"] = df["Weight(KG)"].apply(calc_shipping)
+    df["Selling Price with gst"] = df["Dis Price"] * 1.18
+
+    # GP formula (NO Website charge)
+    df["GP"] = df["Selling Price with gst"] - (
+        df["Landing Cost GST Num"] + df["Shipping"]
+    )
+    df["GP %"] = df.apply(lambda r: (r["GP"] / r["Selling Price with gst"] * 100) if r["Selling Price with gst"] else 0, axis=1)
+
+    if "Sr.No" not in df.columns:
+        df.insert(0, "Sr.No", range(1, len(df) + 1))
+
+    office_cols = [
+        "Sr.No", "Model Name", "SKU", "Product Type", "Brand Company", "QR Code",
+        "Weight(KG)", "Order From", "Order Id", "Qty", "Dis Price", "Date",
+        "Contact", "Email", "Shipping State", "Sales Person",
+        "Landing Cost GST", "Shipping", "Selling Price with gst", "GP", "GP %"
+    ]
+    return df.reindex(columns=[c for c in office_cols if c in df.columns])
+
+def build_summary_sheet(df, label):
+    if df.empty:
+        return pd.DataFrame()
+    summary = df.groupby("Product Type").agg({
+        "Selling Price with gst": "sum",
+        "GP": "sum"
+    }).reset_index()
+    summary["GP%"] = (summary["GP"] / summary["Selling Price with gst"] * 100).round(0).astype(int).astype(str) + "%"
+    totals = pd.DataFrame({
+        "Product Type": ["Grand Total"],
+        "Selling Price with gst": [summary["Selling Price with gst"].sum()],
+        "GP": [summary["GP"].sum()],
+        "GP%": [str(round(summary["GP"].sum() / summary["Selling Price with gst"].sum() * 100)) + "%"]
+    })
+    summary = pd.concat([summary, totals], ignore_index=True)
+    summary.insert(0, label, "")
+    return summary
+
+
+# =====================
+# STREAMLIT APP
+# =====================
 st.set_page_config(page_title="Sales Analysis Tool", layout="wide")
 st.title("📊 Sales Analysis Tool for Orders")
-st.markdown("Upload your sales and cost files to analyze order details")
 
-# File upload section
-st.header("1. Upload Your Files")
 col1, col2 = st.columns(2)
-
 with col1:
     sales_file = st.file_uploader("Upload Sales Excel File", type=["xlsx"], key="sales")
 with col2:
     cost_file = st.file_uploader("Upload Cost Excel File", type=["xlsx"], key="cost")
 
-# Instructions
-with st.expander("📋 Instructions (Click to Expand)"):
-    st.markdown("""
-    ### How to use this tool:
-    
-    1. **Prepare your files**:
-       - Sales file should contain: 
-         - 'Order From'
-         - 'SKU'
-         - 'Weight(KG)'
-         - 'Dis Price'
-       - Cost file should contain:
-         - 'SKU'
-         - 'Landing Cost GST'
-    
-    2. **Upload both files**
-    
-    3. **Choose filter option**:
-       - Website only
-       - Office sales sources
-       - Select specific sources
-    
-    4. **Review the analysis**
-    
-    5. **Download the results**
-    """)
-
 if sales_file and cost_file:
     try:
-        # Read uploaded files
         df = pd.read_excel(sales_file)
         cost_df = pd.read_excel(cost_file)
+        df["Order From"] = df["Order From"].astype(str).str.strip()
 
-        # Required column checks
-        required_sales_cols = ['Order From', 'SKU', 'Weight(KG)', 'Dis Price']
-        required_cost_cols = ['SKU', 'Landing Cost GST']
-        missing_sales = [col for col in required_sales_cols if col not in df.columns]
-        missing_cost = [col for col in required_cost_cols if col not in cost_df.columns]
+        # === FILTER OPTIONS ===
+        st.header("2. Order Source Filter")
+        filter_option = st.radio(
+            "Select which orders to include:",
+            ["Website Only", "Office Sales Sources", "Select Specific Sources"]
+        )
 
-        if missing_sales:
-            st.error(f"Sales file missing: {', '.join(missing_sales)}")
-        elif missing_cost:
-            st.error(f"Cost file missing: {', '.join(missing_cost)}")
-        else:
-            # === FILTER OPTIONS ===
-            st.header("2. Order Source Filter")
-            filter_option = st.radio(
-                "Select which orders to include:",
-                ["Website Only", "Office Sales Sources", "Select Specific Sources"]
-            )
-
-            # Define office sales sources
+        if filter_option == "Website Only":
+            df = df[df["Order From"].str.lower().str.contains("website")].copy()
+        elif filter_option == "Office Sales Sources":
             office_sources = [
                 "nan", "Tender", "Direct Sales", "Chat Tawk",
                 "Reseller", "Instagram", "Facebook", "India Mart", "",
                 "Just Dial", "Exhibition"
             ]
-
-            # Normalize "Order From" column
-            df["Order From"] = df["Order From"].astype(str).str.strip()
-
-            if filter_option == "Website Only":
-                filtered_df = df[df["Order From"].str.lower().str.contains("website")].copy()
-
-            elif filter_option == "Office Sales Sources":
-                filtered_df = df[df["Order From"].isin(office_sources)].copy()
-
-            elif filter_option == "Select Specific Sources":
-                available_sources = sorted(df["Order From"].dropna().unique().tolist())
-                selected_sources = st.multiselect(
-                    "Choose one or more order sources:",
-                    options=available_sources
-                )
-                if selected_sources:
-                    filtered_df = df[df["Order From"].isin(selected_sources)].copy()
-                else:
-                    filtered_df = pd.DataFrame(columns=df.columns)
-
+            df = df[df["Order From"].isin(office_sources)].copy()
+        elif filter_option == "Select Specific Sources":
+            available_sources = sorted(df["Order From"].dropna().unique().tolist())
+            selected_sources = st.multiselect("Choose one or more order sources:", options=available_sources)
+            if selected_sources:
+                df = df[df["Order From"].isin(selected_sources)].copy()
             else:
-                filtered_df = df.copy()
+                df = pd.DataFrame(columns=df.columns)
 
-            if filtered_df.empty:
-                st.warning("No matching orders found with the selected filter.")
-            else:
-                # Deduplicate cost_df
-                cost_df_unique = cost_df.drop_duplicates(subset="SKU", keep="first")
+        if df.empty:
+            st.warning("No matching orders found.")
+        else:
+            website_df = process_website_orders(df, cost_df)
+            office_df = process_office_orders(df, cost_df)
 
-                # Merge Landing Cost GST
-                filtered_df = filtered_df.merge(
-                    cost_df_unique[["SKU", "Landing Cost GST"]],
-                    on="SKU", how="left"
-                )
+            if not website_df.empty:
+                st.header("📑 Website Orders")
+                st.dataframe(website_df)
+                web_excel = BytesIO()
+                with pd.ExcelWriter(web_excel, engine="openpyxl") as writer:
+                    website_df.to_excel(writer, sheet_name="Website Orders", index=False)
+                    build_summary_sheet(website_df, "WEBSITE").to_excel(writer, sheet_name="Website Summary", index=False)
+                st.download_button("📥 Download Website Orders Excel", web_excel.getvalue(), file_name="website_orders.xlsx", mime="application/vnd.ms-excel")
 
-                # Replace missing cost
-                filtered_df["Landing Cost GST"] = filtered_df["Landing Cost GST"].fillna("NA")
-                filtered_df["Landing Cost GST Num"] = pd.to_numeric(
-                    filtered_df["Landing Cost GST"], errors="coerce"
-                ).fillna(0)
+            if not office_df.empty:
+                st.header("📑 Office Sales Orders")
+                st.dataframe(office_df)
+                off_excel = BytesIO()
+                with pd.ExcelWriter(off_excel, engine="openpyxl") as writer:
+                    office_df.to_excel(writer, sheet_name="Office Orders", index=False)
+                    build_summary_sheet(office_df, "OFFLINE SALES").to_excel(writer, sheet_name="Office Summary", index=False)
+                st.download_button("📥 Download Office Sales Excel", off_excel.getvalue(), file_name="office_orders.xlsx", mime="application/vnd.ms-excel")
 
-                # SHIPPING calculation
-                def calc_shipping(w):
-                    try:
-                        return 65 if float(w) <= 1 else float(w) * 65
-                    except:
-                        return 0
-                filtered_df["Shipping"] = filtered_df["Weight(KG)"].apply(calc_shipping)
+            if not website_df.empty or not office_df.empty:
+                combined_excel = BytesIO()
+                with pd.ExcelWriter(combined_excel, engine="openpyxl") as writer:
+                    if not website_df.empty:
+                        website_df.to_excel(writer, sheet_name="Website Orders", index=False)
+                        build_summary_sheet(website_df, "WEBSITE").to_excel(writer, sheet_name="Website Summary", index=False)
+                    if not office_df.empty:
+                        office_df.to_excel(writer, sheet_name="Office Orders", index=False)
+                        build_summary_sheet(office_df, "OFFLINE SALES").to_excel(writer, sheet_name="Office Summary", index=False)
+                st.download_button("📥 Download Combined Excel (Website + Office)", combined_excel.getvalue(), file_name="combined_orders.xlsx", mime="application/vnd.ms-excel")
 
-                # SELLING PRICE WITH GST
-                filtered_df["Selling Prize with gst"] = filtered_df["Dis Price"] * 1.18
-
-                # WEBSITE CHARGE
-                filtered_df["Website charge"] = filtered_df["Selling Prize with gst"] * 0.0185
-
-                # === Ensure Arrow-safe types for display ===
-                for col in filtered_df.columns:
-                    if filtered_df[col].dtype == "object":
-                        filtered_df[col] = filtered_df[col].astype(str)
-
-                # === Show Formulas Section ===
-                with st.expander("📐 Calculation Formulas"):
-                    st.markdown("""
-                    - **Shipping** = ₹65 if Weight ≤ 1 kg, else Weight × ₹65  
-                    - **Selling Price with GST** = Discounted Price × 1.18  
-                    - **Website Charge** = Selling Price with GST × 1.85%  
-                    """)
-
-                # === Sorting Option ===
-                st.header("3. Sorting Options")
-                sort_col = st.selectbox("Order by column:", filtered_df.columns.tolist())
-                sort_order = st.radio("Sort order:", ["Ascending", "Descending"])
-                filtered_df = filtered_df.sort_values(
-                    by=sort_col, ascending=(sort_order == "Ascending")
-                ).reset_index(drop=True)
-
-                # === Results ===
-                st.header("4. Analysis Results")
-                st.metric("Total Orders", len(filtered_df))
-
-                st.subheader("Detailed Orders")
-                st.dataframe(filtered_df)
-
-                # === Export ===
-                output_excel, output_csv = BytesIO(), BytesIO()
-                export_df = filtered_df.drop(columns=['Landing Cost GST Num'], errors='ignore')
-
-                with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
-                    export_df.to_excel(writer, sheet_name='Orders Analysis', index=False)
-                    summary_df = pd.DataFrame({
-                        'Metric': ['Total Orders', 'Total Cost', 'Total Shipping',
-                                   'Total Website Charges'],
-                        'Value': [
-                            len(filtered_df),
-                            filtered_df['Landing Cost GST Num'].sum(),
-                            filtered_df['Shipping'].sum(),
-                            filtered_df['Website charge'].sum()
-                        ]
-                    })
-                    summary_df.to_excel(writer, sheet_name='Summary', index=False)
-
-                export_df.to_csv(output_csv, index=False)
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.download_button(
-                        "📥 Download Excel File", output_excel.getvalue(),
-                        file_name="orders_analysis.xlsx", mime="application/vnd.ms-excel"
-                    )
-                with col2:
-                    st.download_button(
-                        "📥 Download CSV File", output_csv.getvalue(),
-                        file_name="orders_analysis.csv", mime="text/csv"
-                    )
-
-                st.success("✅ Analysis completed successfully.")
+                st.success("✅ Reports generated successfully.")
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
-
 else:
     st.info("👆 Please upload both sales and cost files to begin analysis.")
-
-# Footer
-st.markdown("---")
-st.markdown("### Need help?")
-st.markdown("Contact support if you encounter issues.")
